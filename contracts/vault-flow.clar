@@ -152,3 +152,71 @@
         ERR-INSUFFICIENT-COLLATERAL
     ))
 )
+
+;; Repay borrowed amount to reduce debt obligation
+(define-public (repay (amount uint))
+    (let (
+        (user-pos (default-to
+            { total-collateral: u0, total-borrowed: u0, loan-count: u0 }
+            (map-get? user-positions { user: tx-sender })))
+        (current-borrowed (get total-borrowed user-pos))
+    )
+    (if (<= amount current-borrowed)
+        (begin
+            (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+            (var-set total-borrows (- (var-get total-borrows) amount))
+            (update-user-position tx-sender u0 true amount false)
+            (ok amount)
+        )
+        ERR-INVALID-AMOUNT
+    ))
+)
+
+;; Withdraw collateral while maintaining minimum collateral ratio
+(define-public (withdraw (amount uint))
+    (let (
+        (user-pos (default-to
+            { total-collateral: u0, total-borrowed: u0, loan-count: u0 }
+            (map-get? user-positions { user: tx-sender })))
+        (collateral (get total-collateral user-pos))
+        (borrowed (get total-borrowed user-pos))
+    )
+    (if (and
+            (<= amount collateral)
+            (>= (get-collateral-ratio (- collateral amount) borrowed)
+                (var-get minimum-collateral-ratio)))
+        (begin
+            (try! (as-contract (stx-transfer? amount (as-contract tx-sender) tx-sender)))
+            (var-set total-deposits (- (var-get total-deposits) amount))
+            (update-user-position tx-sender amount false u0 true)
+            (ok amount)
+        )
+        ERR-INSUFFICIENT-COLLATERAL
+    ))
+)
+
+;; LIQUIDATION MECHANISM
+
+;; Liquidate under-collateralized positions to maintain protocol solvency
+(define-public (liquidate (user principal))
+    (let (
+        (user-pos (unwrap! (map-get? user-positions { user: user }) ERR-LOAN-NOT-FOUND))
+        (collateral (get total-collateral user-pos))
+        (borrowed (get total-borrowed user-pos))
+        (ratio (get-collateral-ratio collateral borrowed))
+    )
+    (asserts! (not (is-eq user tx-sender)) ERR-NOT-AUTHORIZED)
+    (asserts! (> borrowed u0) ERR-INVALID-AMOUNT)
+    (if (< ratio (var-get liquidation-threshold))
+        (begin
+            ;; Transfer collateral to liquidator with penalty discount
+            (try! (as-contract (stx-transfer? collateral (as-contract tx-sender) tx-sender)))
+            ;; Clear liquidated position from protocol records
+            (map-delete user-positions { user: user })
+            (var-set total-deposits (- (var-get total-deposits) collateral))
+            (var-set total-borrows (- (var-get total-borrows) borrowed))
+            (ok true)
+        )
+        ERR-LIQUIDATION-FAILED
+    ))
+)
